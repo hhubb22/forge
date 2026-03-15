@@ -11,7 +11,7 @@ use crate::dto::openai::Request;
 /// # Transformation Rules
 ///
 /// - If `reasoning.enabled == Some(false)` → use "none" (disables reasoning)
-/// - If `reasoning.effort` is set (low/medium/high) → use that value
+/// - If `reasoning.effort` is set → use that value directly
 /// - If `reasoning.max_tokens` is set (thinking budget) → convert to effort:
 ///   - 0-1024 → "low"
 ///   - 1025-8192 → "medium"
@@ -22,8 +22,8 @@ use crate::dto::openai::Request;
 ///
 /// # Note
 ///
-/// OpenAI-compatible APIs support: "low", "medium", "high", "max", "min",
-/// "none", or a budget number.
+/// OpenAI-compatible APIs can also expose provider-specific string values such
+/// as "xhigh". Forge preserves those values as-is.
 pub struct SetReasoningEffort;
 
 impl Transformer for SetReasoningEffort {
@@ -141,6 +141,22 @@ mod tests {
         let actual = transformer.transform(fixture);
 
         assert_eq!(actual.reasoning_effort, Some("high".to_string()));
+        assert_eq!(actual.reasoning, None);
+    }
+
+    #[test]
+    fn test_reasoning_with_custom_effort() {
+        let fixture = Request::default().reasoning(ReasoningConfig {
+            enabled: Some(true),
+            effort: Some(Effort::Custom("xhigh".to_string())),
+            max_tokens: None,
+            exclude: None,
+        });
+
+        let mut transformer = SetReasoningEffort;
+        let actual = transformer.transform(fixture);
+
+        assert_eq!(actual.reasoning_effort, Some("xhigh".to_string()));
         assert_eq!(actual.reasoning, None);
     }
 

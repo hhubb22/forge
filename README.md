@@ -374,6 +374,33 @@ model: <provider-specific-model>
 </details>
 
 <details>
+<summary><strong>OpenAI Responses-Compatible Providers</strong></summary>
+
+Use this when your provider implements the OpenAI `Responses` API, but is hosted
+at a different base URL.
+
+Recommended setup:
+
+```bash
+forge provider login openai_responses_compatible
+forge config set provider openai_responses_compatible
+forge config set model <provider-specific-model>
+```
+
+Legacy `.env` setup:
+
+```bash
+# .env
+OPENAI_API_KEY=<your_provider_api_key>
+OPENAI_URL=<your_provider_base_url>
+```
+
+`OPENAI_URL` should be the base API URL, for example
+`https://your-gateway.example.com/openai/v1`.
+
+</details>
+
+<details>
 <summary><strong>Groq</strong></summary>
 
 ```bash

@@ -158,7 +158,11 @@ fn create_info_table(conversation: &Conversation) -> Element {
                 .append(create_table_row("Reasoning Status", status))
                 .append(create_table_row(
                     "Reasoning Effort",
-                    format!("{:?}", reasoning_config.effort),
+                    reasoning_config
+                        .effort
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "None".to_string()),
                 ));
 
             if let Some(max_tokens) = reasoning_config.max_tokens {

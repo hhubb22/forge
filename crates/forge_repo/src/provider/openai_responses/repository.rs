@@ -31,32 +31,20 @@ impl<H: HttpInfra> OpenAIResponsesProvider<H> {
     ///
     /// For the Codex provider, the configured URL is used directly as the
     /// responses endpoint (e.g., `chatgpt.com/backend-api/codex/responses`).
-    /// For all other providers, the path is rewritten to `{host}/v1/responses`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the provider URL cannot be converted to an API base URL
+    /// For other providers, Forge preserves any configured path prefix and
+    /// only rewrites well-known OpenAI-compatible suffixes when needed.
     pub fn new(provider: Provider<Url>, http: Arc<H>) -> Self {
         use forge_domain::ProviderId;
 
         if provider.id == ProviderId::CODEX {
             // Codex uses the configured URL directly as the responses endpoint
             let responses_url = provider.url.clone();
-            let api_base = {
-                let mut base = provider.url.clone();
-                let path = base.path().trim_end_matches('/');
-                let trimmed = path.strip_suffix("/responses").unwrap_or(path).to_owned();
-                base.set_path(&trimmed);
-                base.set_query(None);
-                base.set_fragment(None);
-                base
-            };
+            let api_base = api_base_from_responses_endpoint(&responses_url);
             Self { provider, http, api_base, responses_url }
         } else {
-            // Standard OpenAI pattern: rewrite to /v1/responses
-            let api_base = api_base_from_endpoint_url(&provider.url)
-                .expect("Failed to derive API base URL from provider endpoint");
-            let responses_url = responses_endpoint_from_api_base(&api_base);
+            // Preserve configured prefixes like /openai/v1 or /proxy/v1.
+            let responses_url = responses_endpoint_from_endpoint_url(&provider.url);
+            let api_base = api_base_from_responses_endpoint(&responses_url);
             Self { provider, http, api_base, responses_url }
         }
     }
@@ -127,6 +115,7 @@ impl<T: HttpInfra> OpenAIResponsesProvider<T> {
         model: &ModelId,
         context: ChatContext,
     ) -> ResultStream<ChatCompletionMessage, anyhow::Error> {
+        let reasoning = context.reasoning.clone();
         let headers = create_headers(self.get_headers());
         let mut request = oai::CreateResponse::from_domain(context)?;
         request.model = Some(model.as_str().to_string());
@@ -146,8 +135,7 @@ impl<T: HttpInfra> OpenAIResponsesProvider<T> {
             "Connecting Upstream (Responses API)"
         );
 
-        let json_bytes = serde_json::to_vec(&request)
-            .with_context(|| "Failed to serialize OpenAI Responses request")?;
+        let json_bytes = serialize_responses_request(&request, reasoning.as_ref())?;
 
         // The Codex backend at chatgpt.com does not return
         // `Content-Type: text/event-stream`, which causes the
@@ -259,30 +247,98 @@ impl<T: HttpInfra> OpenAIResponsesProvider<T> {
     }
 }
 
-/// Derives an API base URL suitable for OpenAI Responses API from a configured
-/// endpoint URL.
-///
-/// For Codex/Responses usage we only need the host and the `/v1` prefix.
-/// Any path on the incoming endpoint is ignored in favor of `/v1`.
-fn api_base_from_endpoint_url(endpoint: &Url) -> anyhow::Result<Url> {
-    let mut base = endpoint.clone();
-    base.set_path("/v1");
-    base.set_query(None);
-    base.set_fragment(None);
-    Ok(base)
+fn normalize_endpoint_url(endpoint: &Url) -> Url {
+    let mut url = endpoint.clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    url
 }
 
+/// Derives the API base URL from a concrete Responses endpoint.
+fn api_base_from_responses_endpoint(endpoint: &Url) -> Url {
+    let mut base = normalize_endpoint_url(endpoint);
+    let path = base.path().trim_end_matches('/').to_string();
+    let trimmed = path.strip_suffix("/responses").unwrap_or(&path);
+    let normalized = if trimmed.is_empty() { "/" } else { trimmed };
+    base.set_path(normalized);
+    base
+}
+
+/// Derives a concrete Responses endpoint from a configured provider URL.
+///
+/// Supported inputs:
+/// - `{base}/responses`
+/// - `{base}/chat/completions`
+/// - `{base}`
+///
+/// Any existing path prefix is preserved.
+fn responses_endpoint_from_endpoint_url(endpoint: &Url) -> Url {
+    let mut url = normalize_endpoint_url(endpoint);
+    let path = url.path().trim_end_matches('/');
+
+    let normalized = if path.ends_with("/responses") {
+        path.to_string()
+    } else if let Some(base) = path.strip_suffix("/chat/completions") {
+        format!("{base}/responses")
+    } else if path.is_empty() || path == "/" {
+        "/responses".to_string()
+    } else {
+        format!("{path}/responses")
+    };
+
+    url.set_path(&normalized);
+    url
+}
+
+#[cfg(test)]
 fn responses_endpoint_from_api_base(api_base: &Url) -> Url {
-    let mut url = api_base.clone();
+    let mut url = normalize_endpoint_url(api_base);
 
     let mut path = api_base.path().trim_end_matches('/').to_string();
     path.push_str("/responses");
 
     url.set_path(&path);
-    url.set_query(None);
-    url.set_fragment(None);
-
     url
+}
+
+fn serialize_responses_request(
+    request: &oai::CreateResponse,
+    reasoning: Option<&forge_domain::ReasoningConfig>,
+) -> anyhow::Result<Vec<u8>> {
+    let mut value = serde_json::to_value(request)
+        .with_context(|| "Failed to serialize OpenAI Responses request")?;
+
+    let Some(reasoning) = reasoning else {
+        return serde_json::to_vec(&value)
+            .with_context(|| "Failed to serialize OpenAI Responses request");
+    };
+
+    if reasoning.enabled == Some(false) {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("reasoning");
+        }
+
+        return serde_json::to_vec(&value)
+            .with_context(|| "Failed to serialize OpenAI Responses request");
+    }
+
+    if let Some(effort) = reasoning.effort.as_ref()
+        && let Some(object) = value.as_object_mut()
+    {
+        let reasoning_value = object
+            .entry("reasoning".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+
+        if !reasoning_value.is_object() {
+            *reasoning_value = serde_json::json!({});
+        }
+
+        if let Some(reasoning_object) = reasoning_value.as_object_mut() {
+            reasoning_object.insert("effort".to_string(), serde_json::json!(effort.to_string()));
+        }
+    }
+
+    serde_json::to_vec(&value).with_context(|| "Failed to serialize OpenAI Responses request")
 }
 
 fn request_message_count(request: &oai::CreateResponse) -> usize {
@@ -376,6 +432,7 @@ mod tests {
         Content, Context as ChatContext, ContextMessage, FinishReason, ModelId, Provider,
         ProviderId, ProviderResponse,
     };
+    use pretty_assertions::assert_eq;
     use tokio_stream::StreamExt;
     use url::Url;
 
@@ -487,25 +544,56 @@ mod tests {
     }
 
     #[test]
-    fn test_api_base_from_endpoint_url_trims_expected_suffixes() -> anyhow::Result<()> {
-        let openai_endpoint = Url::parse("https://api.openai.com/v1/chat/completions")?;
-        let openai_base = api_base_from_endpoint_url(&openai_endpoint)?;
-        assert_eq!(openai_base.as_str(), "https://api.openai.com/v1");
+    fn test_api_base_from_responses_endpoint_trims_expected_suffixes() -> anyhow::Result<()> {
+        let openai_endpoint = Url::parse("https://api.openai.com/v1/responses")?;
+        let openai_base = api_base_from_responses_endpoint(&openai_endpoint);
+        let openai_expected = "https://api.openai.com/v1";
+        assert_eq!(openai_base.as_str(), openai_expected);
 
-        let copilot_endpoint = Url::parse("https://api.githubcopilot.com/chat/completions")?;
-        let copilot_base = api_base_from_endpoint_url(&copilot_endpoint)?;
-        assert_eq!(copilot_base.as_str(), "https://api.githubcopilot.com/v1");
+        let custom_endpoint = Url::parse("https://gateway.example.com/openai/v1/responses")?;
+        let custom_base = api_base_from_responses_endpoint(&custom_endpoint);
+        let custom_expected = "https://gateway.example.com/openai/v1";
+        assert_eq!(custom_base.as_str(), custom_expected);
 
         Ok(())
     }
 
     #[test]
-    fn test_api_base_from_endpoint_url_removes_query_and_fragment() -> anyhow::Result<()> {
-        let url = Url::parse("https://api.openai.com/v1/path?query=1#fragment")?;
-        let base = api_base_from_endpoint_url(&url)?;
-        assert_eq!(base.as_str(), "https://api.openai.com/v1");
-        assert!(base.query().is_none());
-        assert!(base.fragment().is_none());
+    fn test_api_base_from_responses_endpoint_removes_query_and_fragment() -> anyhow::Result<()> {
+        let fixture = Url::parse("https://api.openai.com/v1/responses?query=1#fragment")?;
+        let actual = api_base_from_responses_endpoint(&fixture);
+        let expected = "https://api.openai.com/v1";
+
+        assert_eq!(actual.as_str(), expected);
+        assert!(actual.query().is_none());
+        assert!(actual.fragment().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_responses_endpoint_from_endpoint_url_preserves_custom_path_prefix() -> anyhow::Result<()>
+    {
+        let fixture = Url::parse("https://gateway.example.com/openai/v1/responses")?;
+        let actual = responses_endpoint_from_endpoint_url(&fixture);
+        let expected = "https://gateway.example.com/openai/v1/responses";
+
+        assert_eq!(actual.as_str(), expected);
+        assert!(actual.query().is_none());
+        assert!(actual.fragment().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_responses_endpoint_from_endpoint_url_rewrites_chat_completions() -> anyhow::Result<()> {
+        let fixture = Url::parse("https://gateway.example.com/openai/v1/chat/completions")?;
+        let actual = responses_endpoint_from_endpoint_url(&fixture);
+        let expected = "https://gateway.example.com/openai/v1/responses";
+
+        assert_eq!(actual.as_str(), expected);
+        assert!(actual.query().is_none());
+        assert!(actual.fragment().is_none());
 
         Ok(())
     }
@@ -533,6 +621,47 @@ mod tests {
         assert_eq!(endpoint.as_str(), "https://api.openai.com/v1/responses");
         assert!(endpoint.query().is_none());
         assert!(endpoint.fragment().is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_serialize_responses_request_preserves_custom_effort() -> anyhow::Result<()> {
+        let fixture = oai::CreateResponse {
+            model: Some("gpt-5".to_string()),
+            input: oai::InputParam::Text("test".to_string()),
+            ..Default::default()
+        };
+        let reasoning = forge_domain::ReasoningConfig::default()
+            .enabled(true)
+            .effort(forge_domain::Effort::Custom("xhigh".to_string()));
+
+        let actual = serialize_responses_request(&fixture, Some(&reasoning))?;
+        let actual: serde_json::Value = serde_json::from_slice(&actual)?;
+        let expected = serde_json::json!("xhigh");
+
+        assert_eq!(actual["reasoning"]["effort"], expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_serialize_responses_request_removes_reasoning_when_disabled() -> anyhow::Result<()> {
+        let fixture = oai::CreateResponse {
+            model: Some("gpt-5".to_string()),
+            input: oai::InputParam::Text("test".to_string()),
+            reasoning: Some(oai::Reasoning {
+                effort: Some(oai::ReasoningEffort::Medium),
+                summary: Some(oai::ReasoningSummary::Auto),
+            }),
+            ..Default::default()
+        };
+        let reasoning = forge_domain::ReasoningConfig::default().enabled(false);
+
+        let actual = serialize_responses_request(&fixture, Some(&reasoning))?;
+        let actual: serde_json::Value = serde_json::from_slice(&actual)?;
+
+        assert_eq!(actual.get("reasoning"), None);
 
         Ok(())
     }
@@ -588,6 +717,21 @@ mod tests {
             provider_impl.responses_url.as_str(),
             "https://api.openai.com/v1/responses"
         );
+    }
+
+    #[test]
+    fn test_openai_responses_provider_new_preserves_custom_path_prefix() {
+        let fixture = openai_responses(
+            "test-key",
+            "https://gateway.example.com/openai/v1/responses",
+        );
+        let infra = Arc::new(MockHttpClient { client: reqwest::Client::new() });
+        let actual = OpenAIResponsesProvider::<MockHttpClient>::new(fixture, infra);
+        let expected_api_base = "https://gateway.example.com/openai/v1";
+        let expected_responses_url = "https://gateway.example.com/openai/v1/responses";
+
+        assert_eq!(actual.api_base.as_str(), expected_api_base);
+        assert_eq!(actual.responses_url.as_str(), expected_responses_url);
     }
 
     #[test]

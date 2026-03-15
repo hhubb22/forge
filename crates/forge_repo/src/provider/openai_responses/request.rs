@@ -105,11 +105,14 @@ impl FromDomain<ReasoningConfig> for oai::Reasoning {
         // Map effort level
         if let Some(effort) = config.effort {
             let oai_effort = match effort {
-                Effort::High => oai::ReasoningEffort::High,
-                Effort::Medium => oai::ReasoningEffort::Medium,
-                Effort::Low => oai::ReasoningEffort::Low,
+                Effort::High => Some(oai::ReasoningEffort::High),
+                Effort::Medium => Some(oai::ReasoningEffort::Medium),
+                Effort::Low => Some(oai::ReasoningEffort::Low),
+                Effort::Custom(_) => None,
             };
-            builder.effort(oai_effort);
+            if let Some(oai_effort) = oai_effort {
+                builder.effort(oai_effort);
+            }
         } else if config.enabled.unwrap_or(false) {
             // Default to Medium effort when enabled without explicit effort
             builder.effort(oai::ReasoningEffort::Medium);
@@ -392,6 +395,25 @@ mod tests {
 
         // When enabled=true with no explicit effort, should default to Medium
         assert!(actual.effort.is_some());
+        assert!(actual.summary.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_reasoning_config_conversion_with_custom_effort() -> anyhow::Result<()> {
+        use forge_domain::{Effort, ReasoningConfig};
+
+        let fixture = ReasoningConfig {
+            effort: Some(Effort::Custom("xhigh".to_string())),
+            max_tokens: None,
+            exclude: None,
+            enabled: Some(true),
+        };
+
+        let actual = oai::Reasoning::from_domain(fixture)?;
+
+        assert_eq!(actual.effort, None);
         assert!(actual.summary.is_some());
 
         Ok(())

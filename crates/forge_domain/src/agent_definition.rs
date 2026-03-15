@@ -1,11 +1,11 @@
 use std::borrow::Cow;
+use std::fmt;
 
 use derive_more::derive::Display;
 use derive_setters::Setters;
 use merge::Merge;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use strum_macros::Display as StrumDisplay;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::compact::Compact;
 use crate::temperature::Temperature;
@@ -209,17 +209,82 @@ pub struct ReasoningConfig {
 
     /// Enables reasoning at the “medium” effort level with no exclusions.
     /// supported by openrouter, anthropic and forge provider
+    #[serde(alias = "enable")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, StrumDisplay)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
+/// Controls the reasoning effort level sent to upstream providers.
+///
+/// Built-in presets are normalized to `low`, `medium`, and `high`, while
+/// custom provider-specific strings are preserved as-is.
+#[derive(Debug, Clone, JsonSchema, PartialEq, Eq, Hash)]
+#[schemars(with = "String")]
 pub enum Effort {
     High,
     Medium,
     Low,
+    Custom(String),
+}
+
+impl Effort {
+    /// Returns the upstream string representation of the effort value.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+            Self::Custom(value) => value,
+        }
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl Serialize for Effort {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Effort {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+
+        Ok(match value.as_str() {
+            "high" => Self::High,
+            "medium" => Self::Medium,
+            "low" => Self::Low,
+            _ => Self::Custom(value),
+        })
+    }
+}
+
+impl From<String> for Effort {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "high" => Self::High,
+            "medium" => Self::Medium,
+            "low" => Self::Low,
+            _ => Self::Custom(value),
+        }
+    }
+}
+
+impl From<&str> for Effort {
+    fn from(value: &str) -> Self {
+        Self::from(value.to_string())
+    }
 }
 
 /// Converts a thinking budget (max_tokens) to Effort
@@ -313,6 +378,30 @@ mod tests {
         assert_eq!(Effort::from(8193), Effort::High);
         assert_eq!(Effort::from(10000), Effort::High);
         assert_eq!(Effort::from(100000), Effort::High);
+    }
+
+    #[test]
+    fn test_effort_from_string_custom() {
+        let actual = Effort::from("xhigh");
+        let expected = Effort::Custom("xhigh".to_string());
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.to_string(), "xhigh");
+    }
+
+    #[test]
+    fn test_reasoning_config_deserializes_enable_alias() {
+        let fixture = json!({
+            "enable": true,
+            "effort": "xhigh"
+        });
+
+        let actual: ReasoningConfig = serde_json::from_value(fixture).unwrap();
+        let expected = ReasoningConfig::default()
+            .enabled(true)
+            .effort(Effort::Custom("xhigh".to_string()));
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

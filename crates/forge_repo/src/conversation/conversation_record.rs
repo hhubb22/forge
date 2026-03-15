@@ -642,40 +642,11 @@ impl From<ToolChoiceRecord> for forge_domain::ToolChoice {
     }
 }
 
-/// Repository-specific representation of Effort
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(super) enum EffortRecord {
-    High,
-    Medium,
-    Low,
-}
-
-impl From<&forge_domain::Effort> for EffortRecord {
-    fn from(effort: &forge_domain::Effort) -> Self {
-        match effort {
-            forge_domain::Effort::High => Self::High,
-            forge_domain::Effort::Medium => Self::Medium,
-            forge_domain::Effort::Low => Self::Low,
-        }
-    }
-}
-
-impl From<EffortRecord> for forge_domain::Effort {
-    fn from(record: EffortRecord) -> Self {
-        match record {
-            EffortRecord::High => Self::High,
-            EffortRecord::Medium => Self::Medium,
-            EffortRecord::Low => Self::Low,
-        }
-    }
-}
-
 /// Repository-specific representation of ReasoningConfig
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct ReasoningConfigRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
-    effort: Option<EffortRecord>,
+    effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -687,7 +658,7 @@ pub(super) struct ReasoningConfigRecord {
 impl From<&forge_domain::ReasoningConfig> for ReasoningConfigRecord {
     fn from(config: &forge_domain::ReasoningConfig) -> Self {
         Self {
-            effort: config.effort.as_ref().map(EffortRecord::from),
+            effort: config.effort.as_ref().map(ToString::to_string),
             max_tokens: config.max_tokens,
             exclude: config.exclude,
             enabled: config.enabled,
@@ -698,7 +669,7 @@ impl From<&forge_domain::ReasoningConfig> for ReasoningConfigRecord {
 impl From<ReasoningConfigRecord> for forge_domain::ReasoningConfig {
     fn from(record: ReasoningConfigRecord) -> Self {
         forge_domain::ReasoningConfig {
-            effort: record.effort.map(Into::into),
+            effort: record.effort.map(forge_domain::Effort::from),
             max_tokens: record.max_tokens,
             exclude: record.exclude,
             enabled: record.enabled,
@@ -1008,5 +979,48 @@ impl TryFrom<ConversationRecord> for forge_domain::Conversation {
                 forge_domain::MetaData::new(record.created_at.and_utc())
                     .updated_at(record.updated_at.map(|updated_at| updated_at.and_utc())),
             ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn test_reasoning_config_record_preserves_custom_effort() {
+        let fixture = forge_domain::ReasoningConfig::default()
+            .enabled(true)
+            .effort(forge_domain::Effort::Custom("xhigh".to_string()));
+
+        let actual = ReasoningConfigRecord::from(&fixture);
+        let expected = ReasoningConfigRecord {
+            effort: Some("xhigh".to_string()),
+            max_tokens: None,
+            exclude: None,
+            enabled: Some(true),
+        };
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_reasoning_config_from_record_preserves_custom_effort() {
+        let fixture = ReasoningConfigRecord {
+            effort: Some("xhigh".to_string()),
+            max_tokens: Some(2048),
+            exclude: Some(false),
+            enabled: Some(true),
+        };
+
+        let actual = forge_domain::ReasoningConfig::from(fixture);
+        let expected = forge_domain::ReasoningConfig::default()
+            .enabled(true)
+            .exclude(false)
+            .max_tokens(2048)
+            .effort(forge_domain::Effort::Custom("xhigh".to_string()));
+
+        assert_eq!(actual, expected);
     }
 }

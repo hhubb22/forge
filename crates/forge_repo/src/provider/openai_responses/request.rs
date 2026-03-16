@@ -330,8 +330,12 @@ impl FromDomain<ChatContext> for oai::CreateResponse {
             builder.tool_choice(tool_choice);
         }
 
-        // Apply reasoning configuration if provided
-        if let Some(reasoning) = context.reasoning {
+        // OpenAI Responses has no explicit "disabled" reasoning payload. Skip
+        // the field entirely when the user turns reasoning off.
+        if let Some(reasoning) = context
+            .reasoning
+            .filter(|reasoning| reasoning.enabled != Some(false))
+        {
             let reasoning_config = oai::Reasoning::from_domain(reasoning)?;
             builder.reasoning(reasoning_config);
         }
@@ -396,6 +400,21 @@ mod tests {
         // When enabled=true with no explicit effort, should default to Medium
         assert!(actual.effort.is_some());
         assert!(actual.summary.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_codex_request_omits_disabled_reasoning() -> anyhow::Result<()> {
+        use forge_domain::ReasoningConfig;
+
+        let context = ChatContext::default()
+            .add_message(ContextMessage::user("Test", None))
+            .reasoning(ReasoningConfig::default().enabled(false));
+
+        let actual = oai::CreateResponse::from_domain(context)?;
+
+        assert_eq!(actual.reasoning, None);
 
         Ok(())
     }

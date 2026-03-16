@@ -31,22 +31,28 @@ impl<H: HttpInfra> OpenAIResponsesProvider<H> {
     ///
     /// For the Codex provider, the configured URL is used directly as the
     /// responses endpoint (e.g., `chatgpt.com/backend-api/codex/responses`).
-    /// For other providers, Forge preserves any configured path prefix and
-    /// only rewrites well-known OpenAI-compatible suffixes when needed.
+    /// For `openai_responses_compatible`, Forge preserves any configured path
+    /// prefix and only rewrites well-known OpenAI-compatible suffixes when
+    /// needed. Other built-in providers keep their existing `/v1/responses`
+    /// derivation rules.
     pub fn new(provider: Provider<Url>, http: Arc<H>) -> Self {
         use forge_domain::ProviderId;
 
-        if provider.id == ProviderId::CODEX {
-            // Codex uses the configured URL directly as the responses endpoint
+        let (api_base, responses_url) = if provider.id == ProviderId::CODEX {
             let responses_url = provider.url.clone();
             let api_base = api_base_from_responses_endpoint(&responses_url);
-            Self { provider, http, api_base, responses_url }
-        } else {
-            // Preserve configured prefixes like /openai/v1 or /proxy/v1.
+            (api_base, responses_url)
+        } else if provider.id == ProviderId::OPENAI_RESPONSES_COMPATIBLE {
             let responses_url = responses_endpoint_from_endpoint_url(&provider.url);
             let api_base = api_base_from_responses_endpoint(&responses_url);
-            Self { provider, http, api_base, responses_url }
-        }
+            (api_base, responses_url)
+        } else {
+            let api_base = api_base_from_endpoint_url(&provider.url);
+            let responses_url = responses_endpoint_from_api_base(&api_base);
+            (api_base, responses_url)
+        };
+
+        Self { provider, http, api_base, responses_url }
     }
 
     fn get_headers(&self) -> Vec<(String, String)> {
@@ -115,7 +121,12 @@ impl<T: HttpInfra> OpenAIResponsesProvider<T> {
         model: &ModelId,
         context: ChatContext,
     ) -> ResultStream<ChatCompletionMessage, anyhow::Error> {
-        let reasoning = context.reasoning.clone();
+        let reasoning = if self.provider.id == forge_domain::ProviderId::OPENAI_RESPONSES_COMPATIBLE
+        {
+            context.reasoning.clone()
+        } else {
+            None
+        };
         let headers = create_headers(self.get_headers());
         let mut request = oai::CreateResponse::from_domain(context)?;
         request.model = Some(model.as_str().to_string());
@@ -135,7 +146,8 @@ impl<T: HttpInfra> OpenAIResponsesProvider<T> {
             "Connecting Upstream (Responses API)"
         );
 
-        let json_bytes = serialize_responses_request(&request, reasoning.as_ref())?;
+        let json_bytes =
+            serialize_responses_request(&self.provider.id, &request, reasoning.as_ref())?;
 
         // The Codex backend at chatgpt.com does not return
         // `Content-Type: text/event-stream`, which causes the
@@ -254,6 +266,16 @@ fn normalize_endpoint_url(endpoint: &Url) -> Url {
     url
 }
 
+/// Derives an API base URL suitable for built-in OpenAI Responses providers.
+///
+/// Built-in providers keep the historical `/v1` base regardless of the
+/// configured endpoint shape.
+fn api_base_from_endpoint_url(endpoint: &Url) -> Url {
+    let mut base = normalize_endpoint_url(endpoint);
+    base.set_path("/v1");
+    base
+}
+
 /// Derives the API base URL from a concrete Responses endpoint.
 fn api_base_from_responses_endpoint(endpoint: &Url) -> Url {
     let mut base = normalize_endpoint_url(endpoint);
@@ -290,7 +312,6 @@ fn responses_endpoint_from_endpoint_url(endpoint: &Url) -> Url {
     url
 }
 
-#[cfg(test)]
 fn responses_endpoint_from_api_base(api_base: &Url) -> Url {
     let mut url = normalize_endpoint_url(api_base);
 
@@ -302,29 +323,34 @@ fn responses_endpoint_from_api_base(api_base: &Url) -> Url {
 }
 
 fn serialize_responses_request(
+    provider_id: &forge_domain::ProviderId,
     request: &oai::CreateResponse,
     reasoning: Option<&forge_domain::ReasoningConfig>,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut value = serde_json::to_value(request)
-        .with_context(|| "Failed to serialize OpenAI Responses request")?;
+    use forge_domain::{Effort, ProviderId};
 
-    let Some(reasoning) = reasoning else {
-        return serde_json::to_vec(&value)
-            .with_context(|| "Failed to serialize OpenAI Responses request");
-    };
-
-    if reasoning.enabled == Some(false) {
-        if let Some(object) = value.as_object_mut() {
-            object.remove("reasoning");
-        }
-
-        return serde_json::to_vec(&value)
+    if *provider_id != ProviderId::OPENAI_RESPONSES_COMPATIBLE {
+        return serde_json::to_vec(request)
             .with_context(|| "Failed to serialize OpenAI Responses request");
     }
 
-    if let Some(effort) = reasoning.effort.as_ref()
-        && let Some(object) = value.as_object_mut()
-    {
+    let custom_effort = reasoning
+        .filter(|reasoning| reasoning.enabled != Some(false))
+        .and_then(|reasoning| reasoning.effort.as_ref())
+        .and_then(|effort| match effort {
+            Effort::Custom(value) => Some(value),
+            _ => None,
+        });
+
+    let Some(custom_effort) = custom_effort else {
+        return serde_json::to_vec(request)
+            .with_context(|| "Failed to serialize OpenAI Responses request");
+    };
+
+    let mut value = serde_json::to_value(request)
+        .with_context(|| "Failed to serialize OpenAI Responses request")?;
+
+    if let Some(object) = value.as_object_mut() {
         let reasoning_value = object
             .entry("reasoning".to_string())
             .or_insert_with(|| serde_json::json!({}));
@@ -334,7 +360,10 @@ fn serialize_responses_request(
         }
 
         if let Some(reasoning_object) = reasoning_value.as_object_mut() {
-            reasoning_object.insert("effort".to_string(), serde_json::json!(effort.to_string()));
+            reasoning_object.insert(
+                "effort".to_string(),
+                serde_json::json!(custom_effort.to_string()),
+            );
         }
     }
 
@@ -450,12 +479,39 @@ mod tests {
     }
 
     fn openai_responses(key: &str, url: &str) -> Provider<Url> {
+        provider_fixture(ProviderId::OPENAI, ProviderResponse::OpenAI, key, url)
+    }
+
+    fn openai_responses_compatible(key: &str, url: &str) -> Provider<Url> {
+        provider_fixture(
+            ProviderId::OPENAI_RESPONSES_COMPATIBLE,
+            ProviderResponse::OpenAIResponses,
+            key,
+            url,
+        )
+    }
+
+    fn github_copilot_responses(key: &str, url: &str) -> Provider<Url> {
+        provider_fixture(
+            ProviderId::GITHUB_COPILOT,
+            ProviderResponse::OpenAI,
+            key,
+            url,
+        )
+    }
+
+    fn provider_fixture(
+        provider_id: ProviderId,
+        response: ProviderResponse,
+        key: &str,
+        url: &str,
+    ) -> Provider<Url> {
         Provider {
-            id: ProviderId::OPENAI,
+            id: provider_id.clone(),
             provider_type: forge_domain::ProviderType::Llm,
-            response: Some(ProviderResponse::OpenAI),
+            response: Some(response),
             url: Url::parse(url).unwrap(),
-            credential: make_credential(ProviderId::OPENAI, key),
+            credential: make_credential(provider_id, key),
             auth_methods: vec![forge_domain::AuthMethod::ApiKey],
             url_params: vec![],
             models: None,
@@ -544,6 +600,21 @@ mod tests {
     }
 
     #[test]
+    fn test_api_base_from_endpoint_url_trims_expected_suffixes() -> anyhow::Result<()> {
+        let openai_endpoint = Url::parse("https://api.openai.com/v1/chat/completions")?;
+        let openai_base = api_base_from_endpoint_url(&openai_endpoint);
+        let openai_expected = "https://api.openai.com/v1";
+        assert_eq!(openai_base.as_str(), openai_expected);
+
+        let copilot_endpoint = Url::parse("https://api.githubcopilot.com/chat/completions")?;
+        let copilot_base = api_base_from_endpoint_url(&copilot_endpoint);
+        let copilot_expected = "https://api.githubcopilot.com/v1";
+        assert_eq!(copilot_base.as_str(), copilot_expected);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_api_base_from_responses_endpoint_trims_expected_suffixes() -> anyhow::Result<()> {
         let openai_endpoint = Url::parse("https://api.openai.com/v1/responses")?;
         let openai_base = api_base_from_responses_endpoint(&openai_endpoint);
@@ -626,7 +697,8 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_responses_request_preserves_custom_effort() -> anyhow::Result<()> {
+    fn test_serialize_responses_request_preserves_custom_effort_for_compatible_provider()
+    -> anyhow::Result<()> {
         let fixture = oai::CreateResponse {
             model: Some("gpt-5".to_string()),
             input: oai::InputParam::Text("test".to_string()),
@@ -636,7 +708,11 @@ mod tests {
             .enabled(true)
             .effort(forge_domain::Effort::Custom("xhigh".to_string()));
 
-        let actual = serialize_responses_request(&fixture, Some(&reasoning))?;
+        let actual = serialize_responses_request(
+            &ProviderId::OPENAI_RESPONSES_COMPATIBLE,
+            &fixture,
+            Some(&reasoning),
+        )?;
         let actual: serde_json::Value = serde_json::from_slice(&actual)?;
         let expected = serde_json::json!("xhigh");
 
@@ -646,22 +722,26 @@ mod tests {
     }
 
     #[test]
-    fn test_serialize_responses_request_removes_reasoning_when_disabled() -> anyhow::Result<()> {
+    fn test_serialize_responses_request_does_not_override_non_compatible_provider_reasoning()
+    -> anyhow::Result<()> {
         let fixture = oai::CreateResponse {
             model: Some("gpt-5".to_string()),
             input: oai::InputParam::Text("test".to_string()),
             reasoning: Some(oai::Reasoning {
-                effort: Some(oai::ReasoningEffort::Medium),
+                effort: Some(oai::ReasoningEffort::High),
                 summary: Some(oai::ReasoningSummary::Auto),
             }),
             ..Default::default()
         };
-        let reasoning = forge_domain::ReasoningConfig::default().enabled(false);
+        let reasoning = forge_domain::ReasoningConfig::default()
+            .enabled(true)
+            .effort(forge_domain::Effort::Custom("xhigh".to_string()));
 
-        let actual = serialize_responses_request(&fixture, Some(&reasoning))?;
+        let actual = serialize_responses_request(&ProviderId::CODEX, &fixture, Some(&reasoning))?;
         let actual: serde_json::Value = serde_json::from_slice(&actual)?;
+        let expected = serde_json::json!("high");
 
-        assert_eq!(actual.get("reasoning"), None);
+        assert_eq!(actual["reasoning"]["effort"], expected);
 
         Ok(())
     }
@@ -721,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_openai_responses_provider_new_preserves_custom_path_prefix() {
-        let fixture = openai_responses(
+        let fixture = openai_responses_compatible(
             "test-key",
             "https://gateway.example.com/openai/v1/responses",
         );
@@ -729,6 +809,19 @@ mod tests {
         let actual = OpenAIResponsesProvider::<MockHttpClient>::new(fixture, infra);
         let expected_api_base = "https://gateway.example.com/openai/v1";
         let expected_responses_url = "https://gateway.example.com/openai/v1/responses";
+
+        assert_eq!(actual.api_base.as_str(), expected_api_base);
+        assert_eq!(actual.responses_url.as_str(), expected_responses_url);
+    }
+
+    #[test]
+    fn test_openai_responses_provider_new_with_github_copilot_url_uses_v1_responses() {
+        let provider =
+            github_copilot_responses("test-key", "https://api.githubcopilot.com/chat/completions");
+        let infra = Arc::new(MockHttpClient { client: reqwest::Client::new() });
+        let actual = OpenAIResponsesProvider::<MockHttpClient>::new(provider, infra);
+        let expected_api_base = "https://api.githubcopilot.com/v1";
+        let expected_responses_url = "https://api.githubcopilot.com/v1/responses";
 
         assert_eq!(actual.api_base.as_str(), expected_api_base);
         assert_eq!(actual.responses_url.as_str(), expected_responses_url);

@@ -169,6 +169,59 @@ function _forge_action_model() {
     )
 }
 
+# Action handler: Set provider-scoped reasoning preference.
+# Supports direct values (`:reasoning high`) and interactive selection.
+function _forge_action_reasoning() {
+    local input_text="$1"
+
+    echo
+
+    if [[ -n "$input_text" ]]; then
+        local reasoning="$input_text"
+        if [[ "$reasoning" == "clear" ]]; then
+            reasoning="inherit"
+        fi
+        _forge_exec config set reasoning "$reasoning"
+        return 0
+    fi
+
+    (
+        local current_reasoning
+        current_reasoning=$(_forge_exec config get reasoning 2>/dev/null | tail -n 1)
+
+        local output
+        output=$(
+            cat <<'EOF'
+LEVEL  DESCRIPTION
+inherit  Follow agent or workflow default
+off  Disable reasoning
+low  Fastest reasoning
+medium  Balanced reasoning
+high  Deepest reasoning
+EOF
+        )
+
+        local fzf_args=(
+            --delimiter="$_FORGE_DELIMITER"
+            --prompt="Reasoning ❯ "
+            --with-nth="1,2"
+        )
+
+        if [[ -n "$current_reasoning" ]]; then
+            local index=$(_forge_find_index "$output" "$current_reasoning" 1)
+            fzf_args+=(--bind="start:pos($index)")
+        fi
+
+        local selected
+        selected=$(echo "$output" | _forge_fzf --header-lines=1 "${fzf_args[@]}")
+
+        if [[ -n "$selected" ]]; then
+            local reasoning="${selected%% *}"
+            _forge_exec config set reasoning "$reasoning"
+        fi
+    )
+}
+
 # Action handler: Select model for commit message generation
 # Calls `forge config set commit <provider_id> <model_id>` on selection.
 function _forge_action_commit_model() {

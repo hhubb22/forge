@@ -5,11 +5,31 @@ use forge_domain::{Agent, Conversation, ToolDefinition};
 pub struct ApplyTunableParameters {
     agent: Agent,
     tool_definitions: Vec<ToolDefinition>,
+    reasoning_override: Option<forge_domain::ReasoningConfig>,
+    reasoning_supported: bool,
 }
 
 impl ApplyTunableParameters {
     pub const fn new(agent: Agent, tool_definitions: Vec<ToolDefinition>) -> Self {
-        Self { agent, tool_definitions }
+        Self {
+            agent,
+            tool_definitions,
+            reasoning_override: None,
+            reasoning_supported: true,
+        }
+    }
+
+    pub(crate) fn reasoning_override(
+        mut self,
+        reasoning_override: Option<forge_domain::ReasoningConfig>,
+    ) -> Self {
+        self.reasoning_override = reasoning_override;
+        self
+    }
+
+    pub(crate) const fn reasoning_supported(mut self, reasoning_supported: bool) -> Self {
+        self.reasoning_supported = reasoning_supported;
+        self
     }
 
     pub fn apply(self, mut conversation: Conversation) -> Conversation {
@@ -27,8 +47,14 @@ impl ApplyTunableParameters {
         if let Some(max_tokens) = self.agent.max_tokens {
             ctx = ctx.max_tokens(max_tokens.value() as usize);
         }
-        if let Some(ref reasoning) = self.agent.reasoning {
-            ctx = ctx.reasoning(reasoning.clone());
+        if self.reasoning_supported {
+            if let Some(ref reasoning) = self.reasoning_override {
+                ctx = ctx.reasoning(reasoning.clone());
+            } else if let Some(ref reasoning) = self.agent.reasoning {
+                ctx = ctx.reasoning(reasoning.clone());
+            }
+        } else {
+            ctx.reasoning = None;
         }
 
         conversation.context(ctx.tools(self.tool_definitions))
@@ -79,5 +105,46 @@ mod tests {
         assert_eq!(ctx.top_p, Some(TopP::new(0.9).unwrap()));
         assert_eq!(ctx.reasoning, Some(reasoning));
         assert_eq!(ctx.tools, vec![tool_def]);
+    }
+
+    #[test]
+    fn test_apply_uses_reasoning_override_over_agent_reasoning() {
+        let fixture = Agent::new(
+            AgentId::new("test"),
+            ProviderId::ANTHROPIC,
+            ModelId::new("claude-3-5-sonnet-20241022"),
+        )
+        .reasoning(ReasoningConfig::default().effort(forge_domain::Effort::Low));
+        let override_reasoning = ReasoningConfig::default()
+            .enabled(true)
+            .effort(forge_domain::Effort::High);
+        let conversation =
+            Conversation::new(ConversationId::generate()).context(Context::default());
+
+        let actual = ApplyTunableParameters::new(fixture, vec![])
+            .reasoning_override(Some(override_reasoning.clone()))
+            .apply(conversation);
+        let expected = Some(override_reasoning);
+
+        assert_eq!(actual.context.unwrap().reasoning, expected);
+    }
+
+    #[test]
+    fn test_apply_drops_reasoning_when_model_does_not_support_it() {
+        let fixture = Agent::new(
+            AgentId::new("test"),
+            ProviderId::ANTHROPIC,
+            ModelId::new("claude-3-5-sonnet-20241022"),
+        )
+        .reasoning(ReasoningConfig::default().effort(forge_domain::Effort::High));
+        let conversation =
+            Conversation::new(ConversationId::generate()).context(Context::default());
+
+        let actual = ApplyTunableParameters::new(fixture, vec![])
+            .reasoning_supported(false)
+            .apply(conversation);
+        let expected = None;
+
+        assert_eq!(actual.context.unwrap().reasoning, expected);
     }
 }

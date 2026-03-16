@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use forge_app::AppConfigService;
-use forge_domain::{AppConfig, AppConfigRepository, ModelId, ProviderId, ProviderRepository};
+use forge_domain::{
+    AppConfig, AppConfigRepository, ModelId, ProviderId, ProviderRepository, ReasoningPreference,
+};
 
 /// Service for managing user preferences for default providers and models.
 pub struct ForgeAppConfigService<F> {
@@ -77,6 +79,33 @@ impl<F: ProviderRepository + AppConfigRepository + Send + Sync> AppConfigService
 
         self.update(|config| {
             config.model.insert(provider_id, model.clone());
+        })
+        .await
+    }
+
+    async fn get_provider_reasoning(
+        &self,
+        provider_id: &ProviderId,
+    ) -> anyhow::Result<Option<ReasoningPreference>> {
+        let config = self.infra.get_app_config().await?;
+        Ok(config.get_provider_reasoning(provider_id))
+    }
+
+    async fn set_provider_reasoning(
+        &self,
+        provider_id: ProviderId,
+        reasoning: ReasoningPreference,
+    ) -> anyhow::Result<()> {
+        self.update(|config| {
+            config.set_provider_reasoning(provider_id, reasoning);
+        })
+        .await
+    }
+
+    async fn clear_provider_reasoning(&self, provider_id: &ProviderId) -> anyhow::Result<()> {
+        let provider_id = provider_id.clone();
+        self.update(|config| {
+            config.clear_provider_reasoning(&provider_id);
         })
         .await
     }
@@ -410,6 +439,77 @@ mod tests {
         let mut expected = HashMap::new();
         expected.insert(ProviderId::OPENAI, "gpt-4".to_string().into());
         expected.insert(ProviderId::ANTHROPIC, "claude-3".to_string().into());
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_provider_reasoning_when_none_set() -> anyhow::Result<()> {
+        let fixture = MockInfra::new();
+        let service = ForgeAppConfigService::new(Arc::new(fixture));
+
+        let actual = service.get_provider_reasoning(&ProviderId::OPENAI).await?;
+        let expected = None;
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_provider_reasoning() -> anyhow::Result<()> {
+        let fixture = MockInfra::new();
+        let service = ForgeAppConfigService::new(Arc::new(fixture.clone()));
+
+        service
+            .set_provider_reasoning(ProviderId::OPENAI, ReasoningPreference::High)
+            .await?;
+
+        let config = fixture.get_app_config().await?;
+        let actual = config.reasoning.get(&ProviderId::OPENAI).cloned();
+        let expected = Some(ReasoningPreference::High);
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_provider_reasoning_inherit_clears_override() -> anyhow::Result<()> {
+        let fixture = MockInfra::new();
+        let service = ForgeAppConfigService::new(Arc::new(fixture.clone()));
+
+        service
+            .set_provider_reasoning(ProviderId::OPENAI, ReasoningPreference::High)
+            .await?;
+        service
+            .set_provider_reasoning(ProviderId::OPENAI, ReasoningPreference::Inherit)
+            .await?;
+
+        let config = fixture.get_app_config().await?;
+        let actual = config.reasoning.get(&ProviderId::OPENAI).cloned();
+        let expected = None;
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_clear_provider_reasoning() -> anyhow::Result<()> {
+        let fixture = MockInfra::new();
+        let service = ForgeAppConfigService::new(Arc::new(fixture.clone()));
+
+        service
+            .set_provider_reasoning(
+                ProviderId::OPENAI,
+                ReasoningPreference::Custom("xhigh".into()),
+            )
+            .await?;
+        service
+            .clear_provider_reasoning(&ProviderId::OPENAI)
+            .await?;
+
+        let actual = service.get_provider_reasoning(&ProviderId::OPENAI).await?;
+        let expected = None;
 
         assert_eq!(actual, expected);
         Ok(())

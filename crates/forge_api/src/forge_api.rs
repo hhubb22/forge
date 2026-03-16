@@ -293,6 +293,27 @@ impl<
         result
     }
 
+    async fn get_provider_reasoning(
+        &self,
+        provider_id: &ProviderId,
+    ) -> anyhow::Result<Option<forge_domain::ReasoningPreference>> {
+        self.services.get_provider_reasoning(provider_id).await
+    }
+
+    async fn set_provider_reasoning(
+        &self,
+        provider_id: ProviderId,
+        reasoning: forge_domain::ReasoningPreference,
+    ) -> anyhow::Result<()> {
+        self.services
+            .set_provider_reasoning(provider_id, reasoning)
+            .await
+    }
+
+    async fn clear_provider_reasoning(&self, provider_id: &ProviderId) -> anyhow::Result<()> {
+        self.services.clear_provider_reasoning(provider_id).await
+    }
+
     async fn get_commit_config(&self) -> anyhow::Result<Option<CommitConfig>> {
         self.services.get_commit_config().await
     }

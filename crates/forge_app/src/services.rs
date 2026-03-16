@@ -215,6 +215,25 @@ pub trait AppConfigService: Send + Sync {
     /// Returns an error if no default provider is configured.
     async fn set_default_model(&self, model: ModelId) -> anyhow::Result<()>;
 
+    /// Gets the persisted reasoning preference for a provider.
+    async fn get_provider_reasoning(
+        &self,
+        provider_id: &forge_domain::ProviderId,
+    ) -> anyhow::Result<Option<forge_domain::ReasoningPreference>>;
+
+    /// Sets the persisted reasoning preference for a provider.
+    async fn set_provider_reasoning(
+        &self,
+        provider_id: forge_domain::ProviderId,
+        reasoning: forge_domain::ReasoningPreference,
+    ) -> anyhow::Result<()>;
+
+    /// Clears the persisted reasoning preference for a provider.
+    async fn clear_provider_reasoning(
+        &self,
+        provider_id: &forge_domain::ProviderId,
+    ) -> anyhow::Result<()>;
+
     /// Gets the commit configuration (provider and model for commit message
     /// generation).
     async fn get_commit_config(&self) -> anyhow::Result<Option<forge_domain::CommitConfig>>;
@@ -1047,6 +1066,34 @@ impl<I: Services> AppConfigService for I {
 
     async fn set_default_model(&self, model: ModelId) -> anyhow::Result<()> {
         self.config_service().set_default_model(model).await
+    }
+
+    async fn get_provider_reasoning(
+        &self,
+        provider_id: &forge_domain::ProviderId,
+    ) -> anyhow::Result<Option<forge_domain::ReasoningPreference>> {
+        self.config_service()
+            .get_provider_reasoning(provider_id)
+            .await
+    }
+
+    async fn set_provider_reasoning(
+        &self,
+        provider_id: forge_domain::ProviderId,
+        reasoning: forge_domain::ReasoningPreference,
+    ) -> anyhow::Result<()> {
+        self.config_service()
+            .set_provider_reasoning(provider_id, reasoning)
+            .await
+    }
+
+    async fn clear_provider_reasoning(
+        &self,
+        provider_id: &forge_domain::ProviderId,
+    ) -> anyhow::Result<()> {
+        self.config_service()
+            .clear_provider_reasoning(provider_id)
+            .await
     }
 
     async fn get_commit_config(&self) -> anyhow::Result<Option<forge_domain::CommitConfig>> {

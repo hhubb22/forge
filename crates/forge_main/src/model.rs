@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use forge_api::{Agent, Model, Template};
-use forge_domain::UserCommand;
+use forge_domain::{ReasoningPreference, UserCommand};
 use strum::{EnumProperty, IntoEnumIterator};
 use strum_macros::{EnumIter, EnumProperty};
 
@@ -92,6 +92,7 @@ impl ForgeCommandManager {
                 | "dump"
                 | "model"
                 | "tools"
+                | "reasoning"
                 | "login"
                 | "logout"
                 | "retry"
@@ -267,6 +268,9 @@ impl ForgeCommandManager {
             "/sage" => Ok(SlashCommand::Sage),
             "/help" => Ok(SlashCommand::Help),
             "/model" => Ok(SlashCommand::Model),
+            "/reasoning" => Ok(SlashCommand::Reasoning(ReasoningCommand::parse(
+                &parameters,
+            )?)),
             "/provider" => Ok(SlashCommand::Provider),
             "/tools" => Ok(SlashCommand::Tools),
             "/agent" => Ok(SlashCommand::Agent),
@@ -382,6 +386,10 @@ pub enum SlashCommand {
     /// This can be triggered with the '/model' command.
     #[strum(props(usage = "Switch to a different model"))]
     Model,
+    /// Switch or select the active reasoning preference.
+    /// This can be triggered with the '/reasoning' command.
+    #[strum(props(usage = "Switch to a different reasoning level"))]
+    Reasoning(ReasoningCommand),
     /// Switch or select the active provider
     /// This can be triggered with the '/provider' command.
     #[strum(props(usage = "Switch to a different provider"))]
@@ -439,6 +447,45 @@ pub enum SlashCommand {
     Index,
 }
 
+/// Slash-command actions for managing interactive reasoning preferences.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ReasoningCommand {
+    /// Open the interactive reasoning picker.
+    #[default]
+    Prompt,
+    /// Clear any explicit reasoning override.
+    Clear,
+    /// Cycle through the standard reasoning presets.
+    Cycle,
+    /// Persist a specific reasoning preference.
+    Set(ReasoningPreference),
+}
+
+impl ReasoningCommand {
+    fn parse(parameters: &[&str]) -> anyhow::Result<Self> {
+        match parameters {
+            [] => Ok(Self::Prompt),
+            ["clear"] => Ok(Self::Clear),
+            ["cycle"] => Ok(Self::Cycle),
+            ["set"] => Err(anyhow::anyhow!("Usage: /reasoning set <effort>")),
+            ["set", value @ ..] => {
+                let value = value.join(" ");
+                let reasoning = value
+                    .parse::<ReasoningPreference>()
+                    .map_err(anyhow::Error::msg)?;
+                Ok(Self::Set(reasoning))
+            }
+            [value] => {
+                let reasoning = value
+                    .parse::<ReasoningPreference>()
+                    .map_err(anyhow::Error::msg)?;
+                Ok(Self::Set(reasoning))
+            }
+            _ => Err(anyhow::anyhow!("Invalid reasoning command")),
+        }
+    }
+}
+
 impl SlashCommand {
     pub fn name(&self) -> &str {
         match self {
@@ -457,6 +504,7 @@ impl SlashCommand {
             SlashCommand::Commit { .. } => "commit",
             SlashCommand::Dump { .. } => "dump",
             SlashCommand::Model => "model",
+            SlashCommand::Reasoning(_) => "reasoning",
             SlashCommand::Provider => "provider",
             SlashCommand::Tools => "tools",
             SlashCommand::Custom(event) => &event.name,
@@ -487,7 +535,7 @@ mod tests {
     use forge_api::{
         AnyProvider, InputModality, Model, ModelId, ModelSource, ProviderId, ProviderResponse,
     };
-    use forge_domain::Provider;
+    use forge_domain::{Provider, ReasoningPreference};
     use pretty_assertions::assert_eq;
     use url::Url;
 
@@ -1235,6 +1283,48 @@ mod tests {
 
         // Verify
         let expected = SlashCommand::Dump { html: true };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_parse_reasoning_command_without_args() {
+        let fixture = ForgeCommandManager::default();
+
+        let actual = fixture.parse("/reasoning").unwrap();
+        let expected = SlashCommand::Reasoning(ReasoningCommand::Prompt);
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_parse_reasoning_command_set_standard_value() {
+        let fixture = ForgeCommandManager::default();
+
+        let actual = fixture.parse("/reasoning high").unwrap();
+        let expected = SlashCommand::Reasoning(ReasoningCommand::Set(ReasoningPreference::High));
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_parse_reasoning_command_set_custom_value() {
+        let fixture = ForgeCommandManager::default();
+
+        let actual = fixture.parse("/reasoning set xhigh").unwrap();
+        let expected = SlashCommand::Reasoning(ReasoningCommand::Set(ReasoningPreference::Custom(
+            "xhigh".to_string(),
+        )));
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_parse_reasoning_command_clear() {
+        let fixture = ForgeCommandManager::default();
+
+        let actual = fixture.parse("/reasoning clear").unwrap();
+        let expected = SlashCommand::Reasoning(ReasoningCommand::Clear);
+
         assert_eq!(actual, expected);
     }
 }

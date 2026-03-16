@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use forge_domain::{AgentId, ConversationId, ModelId, ProviderId};
+use forge_domain::{AgentId, ConversationId, ModelId, ProviderId, ReasoningPreference};
 
 #[derive(Parser)]
 #[command(version = env!("CARGO_PKG_VERSION"))]
@@ -560,6 +560,11 @@ pub enum ConfigSetField {
         /// Model ID to use for command suggestion generation.
         model: ModelId,
     },
+    /// Set the active reasoning preference.
+    Reasoning {
+        /// Reasoning preference to persist for the active provider.
+        reasoning: ReasoningPreference,
+    },
 }
 
 /// Type-safe subcommands for `forge config get`.
@@ -569,6 +574,8 @@ pub enum ConfigGetField {
     Model,
     /// Get the active provider.
     Provider,
+    /// Get the active reasoning preference.
+    Reasoning,
     /// Get the commit message generation config.
     Commit,
     /// Get the command suggestion generation config.
@@ -896,6 +903,36 @@ mod tests {
                 _ => panic!("Expected ConfigCommand::Get"),
             },
             _ => panic!("Expected TopLevelCommand::Config"),
+        };
+        assert!(actual);
+    }
+
+    #[test]
+    fn test_config_set_with_reasoning() {
+        let fixture = Cli::parse_from(["forge", "config", "set", "reasoning", "high"]);
+        let actual = match fixture.subcommands {
+            Some(TopLevelCommand::Config(config)) => match config.command {
+                ConfigCommand::Set(args) => match args.field {
+                    ConfigSetField::Reasoning { reasoning } => Some(reasoning),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
+        let expected = Some(ReasoningPreference::High);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_config_get_reasoning_field() {
+        let fixture = Cli::parse_from(["forge", "config", "get", "reasoning"]);
+        let actual = match fixture.subcommands {
+            Some(TopLevelCommand::Config(config)) => match config.command {
+                ConfigCommand::Get(args) => matches!(args.field, ConfigGetField::Reasoning),
+                _ => false,
+            },
+            _ => false,
         };
         assert!(actual);
     }

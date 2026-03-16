@@ -5,7 +5,7 @@ use std::process::Command;
 
 use convert_case::{Case, Casing};
 use derive_setters::Setters;
-use forge_api::{AgentId, ModelId, Usage};
+use forge_api::{AgentId, ModelId, ReasoningPreference, Usage};
 use forge_tracker::VERSION;
 use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptHistorySearchStatus};
@@ -24,6 +24,7 @@ pub struct ForgePrompt {
     pub usage: Option<Usage>,
     pub agent_id: AgentId,
     pub model: Option<ModelId>,
+    pub reasoning: ReasoningPreference,
 }
 
 impl Prompt for ForgePrompt {
@@ -70,7 +71,7 @@ impl Prompt for ForgePrompt {
 
     fn render_prompt_right(&self) -> Cow<'_, str> {
         // Use a string buffer with pre-allocation to reduce allocations
-        let mut result = String::with_capacity(32);
+        let mut result = String::with_capacity(48);
 
         // Start with bracket and version
         write!(result, "[{VERSION}").unwrap();
@@ -84,6 +85,8 @@ impl Prompt for ForgePrompt {
                 .unwrap_or_else(|| model.as_str());
             write!(result, "/{formatted_model}").unwrap();
         }
+
+        write!(result, "/r:{}", self.reasoning).unwrap();
 
         if let Some(usage) = self.usage.as_ref().map(|usage| &usage.total_tokens) {
             write!(result, "/{usage}").unwrap();
@@ -180,6 +183,7 @@ mod tests {
                 usage: None,
                 agent_id: AgentId::default(),
                 model: None,
+                reasoning: ReasoningPreference::Inherit,
             }
         }
     }
@@ -309,5 +313,15 @@ mod tests {
         assert!(!actual.contains("anthropic/claude-3")); // Should not contain the full model ID
         assert!(actual.contains(&VERSION.to_string()));
         assert!(actual.contains("30"));
+    }
+
+    #[test]
+    fn test_render_prompt_right_with_reasoning() {
+        let mut prompt = ForgePrompt::default();
+        let _ = prompt.reasoning(ReasoningPreference::High);
+
+        let actual = prompt.render_prompt_right();
+
+        assert!(actual.contains("r:high"));
     }
 }

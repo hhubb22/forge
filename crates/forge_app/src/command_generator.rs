@@ -252,6 +252,25 @@ mod tests {
             Ok(())
         }
 
+        async fn get_provider_reasoning(
+            &self,
+            _provider_id: &ProviderId,
+        ) -> Result<Option<forge_domain::ReasoningPreference>> {
+            Ok(None)
+        }
+
+        async fn set_provider_reasoning(
+            &self,
+            _provider_id: ProviderId,
+            _reasoning: forge_domain::ReasoningPreference,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_provider_reasoning(&self, _provider_id: &ProviderId) -> Result<()> {
+            Ok(())
+        }
+
         async fn get_commit_config(&self) -> Result<Option<forge_domain::CommitConfig>> {
             Ok(None)
         }

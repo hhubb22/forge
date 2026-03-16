@@ -16,6 +16,10 @@
     "description": "Switch the models [alias: m, model]"
   },
   {
+    "command": "reasoning",
+    "description": "Switch the reasoning level"
+  },
+  {
     "command": "config-commit-model",
     "description": "Set the model used for commit message generation [alias: ccm]"
   },

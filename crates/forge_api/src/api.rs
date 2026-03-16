@@ -157,6 +157,22 @@ pub trait API: Sync + Send {
     /// Sets the operating model
     async fn set_default_model(&self, model_id: ModelId) -> anyhow::Result<()>;
 
+    /// Gets the reasoning preference for a provider.
+    async fn get_provider_reasoning(
+        &self,
+        provider_id: &ProviderId,
+    ) -> anyhow::Result<Option<forge_domain::ReasoningPreference>>;
+
+    /// Sets the reasoning preference for a provider.
+    async fn set_provider_reasoning(
+        &self,
+        provider_id: ProviderId,
+        reasoning: forge_domain::ReasoningPreference,
+    ) -> anyhow::Result<()>;
+
+    /// Clears the reasoning preference for a provider.
+    async fn clear_provider_reasoning(&self, provider_id: &ProviderId) -> anyhow::Result<()>;
+
     /// Gets the commit configuration (provider and model for commit message
     /// generation).
     async fn get_commit_config(&self) -> anyhow::Result<Option<forge_domain::CommitConfig>>;

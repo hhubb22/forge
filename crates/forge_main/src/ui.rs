@@ -17,7 +17,8 @@ use forge_app::utils::{format_display_path, truncate_key};
 use forge_app::{CommitResult, ToolResolver};
 use forge_display::MarkdownFormat;
 use forge_domain::{
-    AuthMethod, ChatResponseContent, ConsoleWriter, ContextMessage, Role, TitleFormat, UserCommand,
+    AuthMethod, ChatResponseContent, ConsoleWriter, ContextMessage, ReasoningPreference, Role,
+    TitleFormat, UserCommand,
 };
 use forge_fs::ForgeFS;
 use forge_select::ForgeWidget;
@@ -36,7 +37,7 @@ use crate::display_constants::{CommandType, headers, markers, status};
 use crate::editor::ReadLineError;
 use crate::info::Info;
 use crate::input::Console;
-use crate::model::{ForgeCommandManager, SlashCommand};
+use crate::model::{ForgeCommandManager, ReasoningCommand, SlashCommand};
 use crate::porcelain::Porcelain;
 use crate::prompt::ForgePrompt;
 use crate::state::UIState;
@@ -57,6 +58,13 @@ const MISSING_AGENT_TITLE: &str = "<missing agent.title>";
 struct ConversationDump {
     conversation: Conversation,
     related_conversations: Vec<Conversation>,
+}
+
+#[derive(Clone)]
+struct SelectedModel {
+    model_id: ModelId,
+    provider_id: ProviderId,
+    supports_reasoning: Option<bool>,
 }
 
 /// Formats an MCP server config for display, redacting sensitive information.
@@ -153,6 +161,20 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
         }
     }
 
+    /// Helper to get the persisted reasoning preference for the provider used
+    /// by an optional agent.
+    async fn get_reasoning_preference(
+        &self,
+        agent_id: Option<AgentId>,
+    ) -> Result<ReasoningPreference> {
+        let provider = self.get_provider(agent_id).await?;
+        Ok(self
+            .api
+            .get_provider_reasoning(&provider.id)
+            .await?
+            .unwrap_or_default())
+    }
+
     /// Displays banner only if user is in interactive mode.
     fn display_banner(&self) -> Result<()> {
         if self.cli.is_interactive() {
@@ -241,11 +263,20 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
         };
 
         // Prompt the user for input
-        let agent_id = self.api.get_active_agent().await.unwrap_or_default();
-        let model = self
-            .get_agent_model(self.api.get_active_agent().await)
-            .await;
-        let forge_prompt = ForgePrompt { cwd: self.state.cwd.clone(), usage, model, agent_id };
+        let active_agent = self.api.get_active_agent().await;
+        let agent_id = active_agent.clone().unwrap_or_default();
+        let model = self.get_agent_model(active_agent.clone()).await;
+        let reasoning = self
+            .get_reasoning_preference(active_agent)
+            .await
+            .unwrap_or_default();
+        let forge_prompt = ForgePrompt {
+            cwd: self.state.cwd.clone(),
+            usage,
+            model,
+            agent_id,
+            reasoning,
+        };
         self.console.prompt(forge_prompt).await
     }
 
@@ -1305,6 +1336,11 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
             .ok()
             .map(|p| p.id.to_string())
             .unwrap_or_else(|| markers::EMPTY.to_string());
+        let reasoning = self
+            .get_reasoning_preference(None)
+            .await
+            .map(|reasoning| reasoning.to_string())
+            .unwrap_or_else(|_| markers::EMPTY.to_string());
         let commit_config = self.api.get_commit_config().await.ok().flatten();
         let commit_provider = commit_config
             .as_ref()
@@ -1331,6 +1367,7 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
             .add_title("CONFIGURATION")
             .add_key_value("Default Model", model)
             .add_key_value("Default Provider", provider)
+            .add_key_value("Default Reasoning", reasoning)
             .add_key_value("Commit Provider", commit_provider)
             .add_key_value("Commit Model", commit_model)
             .add_key_value("Suggest Provider", suggest_provider)
@@ -1874,6 +1911,9 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
             SlashCommand::Model => {
                 self.on_model_selection().await?;
             }
+            SlashCommand::Reasoning(command) => {
+                self.on_reasoning_command(command).await?;
+            }
             SlashCommand::Provider => {
                 self.on_provider_selection().await?;
             }
@@ -2027,7 +2067,7 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
     /// - `Ok(Some(ModelId))` if a model was selected
     /// - `Ok(None)` if selection was canceled
     #[async_recursion::async_recursion]
-    async fn select_model(&mut self) -> Result<Option<ModelId>> {
+    async fn select_model(&mut self) -> Result<Option<SelectedModel>> {
         // Check if provider is set otherwise first ask to select a provider
         if self.api.get_default_provider().await.is_err() {
             self.on_provider_selection().await?;
@@ -2120,10 +2160,14 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
         // Build a flat list of (ModelId, display_line) for the data rows.
         // The first line is the header; data rows follow in the same order as
         // the Info entries (sorted by provider, then model within provider).
-        let mut model_ids: Vec<ModelId> = Vec::new();
+        let mut model_rows_data: Vec<SelectedModel> = Vec::new();
         for pm in &all_provider_models {
             for model in &pm.models {
-                model_ids.push(model.id.clone());
+                model_rows_data.push(SelectedModel {
+                    model_id: model.id.clone(),
+                    provider_id: pm.provider_id.clone(),
+                    supports_reasoning: model.supports_reasoning,
+                });
             }
         }
 
@@ -2131,7 +2175,7 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
         // model IDs.
         #[derive(Clone)]
         struct ModelRow {
-            model_id: Option<ModelId>,
+            selection: Option<SelectedModel>,
             display: String,
         }
         impl std::fmt::Display for ModelRow {
@@ -2142,11 +2186,11 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
 
         let mut rows: Vec<ModelRow> = Vec::with_capacity(all_lines.len());
         // Header row (non-selectable via header_lines=1)
-        rows.push(ModelRow { model_id: None, display: all_lines[0].to_string() });
+        rows.push(ModelRow { selection: None, display: all_lines[0].to_string() });
         // Data rows
         for (i, line) in all_lines.iter().skip(1).enumerate() {
             rows.push(ModelRow {
-                model_id: model_ids.get(i).cloned(),
+                selection: model_rows_data.get(i).cloned(),
                 display: line.to_string(),
             });
         }
@@ -2154,12 +2198,24 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
         // Find starting cursor position for the current model.
         // The cursor position is relative to the data rows (header is excluded
         // by fzf's --header-lines), so index 0 = first data row.
+        let current_provider = self
+            .get_provider(self.api.get_active_agent().await)
+            .await
+            .ok()
+            .map(|provider| provider.id);
         let current_model = self
             .get_agent_model(self.api.get_active_agent().await)
             .await;
         let starting_cursor = current_model
             .as_ref()
-            .and_then(|current| model_ids.iter().position(|id| id == current))
+            .and_then(|current| {
+                model_rows_data.iter().position(|selection| {
+                    selection.model_id == *current
+                        && current_provider
+                            .as_ref()
+                            .is_none_or(|provider_id| selection.provider_id == *provider_id)
+                })
+            })
             .unwrap_or(0);
 
         match ForgeWidget::select("Model", rows)
@@ -2167,7 +2223,7 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
             .with_header_lines(1)
             .prompt()?
         {
-            Some(row) => Ok(row.model_id),
+            Some(row) => Ok(row.selection),
             None => Ok(None),
         }
     }
@@ -2642,20 +2698,153 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
         let model_option = self.select_model().await?;
 
         // If no model was selected (user canceled), return early
-        let model = match model_option {
-            Some(model) => model,
+        let selection = match model_option {
+            Some(selection) => selection,
             None => return Ok(None),
         };
 
+        let current_provider = self
+            .get_provider(self.api.get_active_agent().await)
+            .await
+            .ok()
+            .map(|provider| provider.id);
+
+        if current_provider.as_ref() != Some(&selection.provider_id) {
+            self.api
+                .set_default_provider(selection.provider_id.clone())
+                .await?;
+        }
+
         // Update the operating model via API
-        self.api.set_default_model(model.clone()).await?;
+        self.api
+            .set_default_model(selection.model_id.clone())
+            .await?;
 
         // Update the UI state with the new model
-        self.update_model(Some(model.clone()));
+        self.update_model(Some(selection.model_id.clone()));
 
-        self.writeln_title(TitleFormat::action(format!("Switched to model: {model}")))?;
+        self.writeln_title(TitleFormat::action(format!(
+            "Switched to model: {}",
+            selection.model_id
+        )))?;
 
-        Ok(Some(model))
+        if selection.supports_reasoning != Some(false) {
+            self.select_reasoning_for_provider(&selection.provider_id)
+                .await?;
+        }
+
+        Ok(Some(selection.model_id))
+    }
+
+    async fn on_reasoning_command(&mut self, command: ReasoningCommand) -> Result<()> {
+        let provider = self.get_provider(self.api.get_active_agent().await).await?;
+
+        match command {
+            ReasoningCommand::Prompt => {
+                self.select_reasoning_for_provider(&provider.id).await?;
+            }
+            ReasoningCommand::Clear => {
+                self.set_reasoning_preference(provider.id, ReasoningPreference::Inherit)
+                    .await?;
+            }
+            ReasoningCommand::Cycle => {
+                let current = self
+                    .api
+                    .get_provider_reasoning(&provider.id)
+                    .await?
+                    .unwrap_or_default();
+                self.set_reasoning_preference(provider.id, current.next())
+                    .await?;
+            }
+            ReasoningCommand::Set(reasoning) => {
+                self.set_reasoning_preference(provider.id, reasoning)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn select_reasoning_for_provider(&mut self, provider_id: &ProviderId) -> Result<()> {
+        #[derive(Clone)]
+        struct ReasoningRow {
+            preference: ReasoningPreference,
+            label: String,
+        }
+
+        impl Display for ReasoningRow {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.label)
+            }
+        }
+
+        let current = self
+            .api
+            .get_provider_reasoning(provider_id)
+            .await?
+            .unwrap_or_default();
+        let options = vec![
+            ReasoningRow {
+                preference: ReasoningPreference::Inherit,
+                label: "inherit   Use agent/provider defaults".to_string(),
+            },
+            ReasoningRow {
+                preference: ReasoningPreference::Off,
+                label: "off       Disable reasoning".to_string(),
+            },
+            ReasoningRow {
+                preference: ReasoningPreference::Low,
+                label: "low       Favor speed over depth".to_string(),
+            },
+            ReasoningRow {
+                preference: ReasoningPreference::Medium,
+                label: "medium    Balanced reasoning".to_string(),
+            },
+            ReasoningRow {
+                preference: ReasoningPreference::High,
+                label: "high      Favor depth over speed".to_string(),
+            },
+        ];
+
+        let starting_cursor = options
+            .iter()
+            .position(|option| option.preference == current)
+            .unwrap_or(0);
+
+        if let Some(selection) = ForgeWidget::select("Reasoning", options)
+            .with_starting_cursor(starting_cursor)
+            .prompt()?
+        {
+            self.set_reasoning_preference(provider_id.clone(), selection.preference)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn set_reasoning_preference(
+        &mut self,
+        provider_id: ProviderId,
+        preference: ReasoningPreference,
+    ) -> Result<()> {
+        let badge = preference.to_string();
+        if preference == ReasoningPreference::Inherit {
+            self.api.clear_provider_reasoning(&provider_id).await?;
+            self.writeln_title(
+                TitleFormat::action("Reasoning")
+                    .sub_title(format!("inherit for provider '{provider_id}'")),
+            )?;
+        } else {
+            self.api
+                .set_provider_reasoning(provider_id.clone(), preference)
+                .await?;
+            self.writeln_title(
+                TitleFormat::action("Reasoning")
+                    .sub_title(format!("{badge} for provider '{provider_id}'")),
+            )?;
+        }
+
+        Ok(())
     }
 
     async fn on_provider_selection(&mut self) -> Result<()> {
@@ -3382,6 +3571,11 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
                     format!("is now the suggest model for provider '{provider}'"),
                 ))?;
             }
+            ConfigSetField::Reasoning { reasoning } => {
+                let provider = self.get_provider(None).await?;
+                self.set_reasoning_preference(provider.id, reasoning)
+                    .await?;
+            }
         }
 
         Ok(())
@@ -3415,6 +3609,10 @@ impl<A: API + ConsoleWriter + 'static, F: Fn() -> A + Send + Sync> UI<A, F> {
                     None => self.writeln("Provider: Not set")?,
                 }
             }
+            ConfigGetField::Reasoning => match self.get_reasoning_preference(None).await {
+                Ok(reasoning) => self.writeln(reasoning.to_string())?,
+                Err(_) => self.writeln("Reasoning: Not set")?,
+            },
             ConfigGetField::Commit => {
                 let commit_config = self.api.get_commit_config().await?;
                 match commit_config {

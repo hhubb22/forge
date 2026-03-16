@@ -14,7 +14,8 @@ use crate::hooks::{CompactionHandler, DoomLoopDetector, TitleGenerationHandler, 
 use crate::init_conversation_metrics::InitConversationMetrics;
 use crate::orch::Orchestrator;
 use crate::services::{
-    AgentRegistry, CustomInstructionsService, ProviderAuthService, TemplateService,
+    AgentRegistry, AppConfigService, CustomInstructionsService, ProviderAuthService,
+    TemplateService,
 };
 use crate::set_conversation_id::SetConversationId;
 use crate::system_prompt::SystemPrompt;
@@ -101,6 +102,15 @@ impl<S: Services> ForgeApp<S> {
             .await?;
 
         let models = services.models(agent_provider).await?;
+        let reasoning_override = services
+            .get_provider_reasoning(&agent.provider)
+            .await?
+            .and_then(|preference| preference.to_reasoning_config());
+        let reasoning_supported = models
+            .iter()
+            .find(|model| model.id == agent.model)
+            .and_then(|model| model.supports_reasoning)
+            != Some(false);
 
         // Get system and mcp tool definitions and resolve them for the agent
         let all_tool_definitions = self.tool_registry.list().await?;
@@ -138,6 +148,8 @@ impl<S: Services> ForgeApp<S> {
 
         let conversation = InitConversationMetrics::new(current_time).apply(conversation);
         let conversation = ApplyTunableParameters::new(agent.clone(), tool_definitions.clone())
+            .reasoning_override(reasoning_override)
+            .reasoning_supported(reasoning_supported)
             .apply(conversation);
         let conversation = SetConversationId.apply(conversation);
 
